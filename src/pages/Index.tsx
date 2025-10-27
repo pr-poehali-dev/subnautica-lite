@@ -23,9 +23,15 @@ interface Item {
   count: number;
 }
 
+interface TerrainCell {
+  height: number;
+  type: 'sand' | 'rock' | 'coral' | 'kelp';
+}
+
 function Index() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [position, setPosition] = useState<Position>({ x: 0, y: -5, z: 0 });
+  const terrainRef = useRef<TerrainCell[][]>([]);
+  const [position, setPosition] = useState<Position>({ x: 50, y: 1.5, z: 50 });
   const [rotation, setRotation] = useState({ pitch: 0, yaw: 0 });
   const [stats, setStats] = useState<PlayerStats>({
     health: 100,
@@ -40,7 +46,32 @@ function Index() {
   ]);
   const [showInventory, setShowInventory] = useState(false);
   const [keys, setKeys] = useState<Record<string, boolean>>({});
-  const mouseRef = useRef({ x: 0, y: 0, locked: false });
+  const mouseRef = useRef({ locked: false });
+
+  useEffect(() => {
+    const TERRAIN_SIZE = 100;
+    const terrain: TerrainCell[][] = [];
+    
+    for (let x = 0; x < TERRAIN_SIZE; x++) {
+      terrain[x] = [];
+      for (let z = 0; z < TERRAIN_SIZE; z++) {
+        const noise1 = Math.sin(x * 0.1) * Math.cos(z * 0.1);
+        const noise2 = Math.sin(x * 0.05 + z * 0.05) * 2;
+        const noise3 = Math.sin(x * 0.02) * Math.cos(z * 0.02) * 4;
+        const height = (noise1 + noise2 + noise3) * 0.5;
+        
+        let type: TerrainCell['type'] = 'sand';
+        const rand = Math.random();
+        if (height > 1.5) type = 'rock';
+        else if (height > 0.5 && rand > 0.7) type = 'coral';
+        else if (rand > 0.85) type = 'kelp';
+        
+        terrain[x][z] = { height, type };
+      }
+    }
+    
+    terrainRef.current = terrain;
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -52,61 +83,108 @@ function Index() {
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
 
-    const drawOcean = () => {
-      const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
-      gradient.addColorStop(0, '#051129');
-      gradient.addColorStop(0.5, '#0A1628');
-      gradient.addColorStop(1, '#0D1F3C');
-      ctx.fillStyle = gradient;
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const renderRaycast = () => {
+      const screenWidth = canvas.width;
+      const screenHeight = canvas.height;
+      const fov = Math.PI / 3;
+      const halfHeight = screenHeight / 2;
+      
+      const depthFactor = Math.abs(position.y) / 10;
+      const baseColor = { r: 5, g: 17, b: 41 };
+      const deepColor = { r: 3, g: 8, b: 20 };
+      const currentColor = {
+        r: Math.floor(baseColor.r + (deepColor.r - baseColor.r) * depthFactor),
+        g: Math.floor(baseColor.g + (deepColor.g - baseColor.g) * depthFactor),
+        b: Math.floor(baseColor.b + (deepColor.b - baseColor.b) * depthFactor)
+      };
 
-      ctx.fillStyle = 'rgba(14, 165, 233, 0.1)';
-      for (let i = 0; i < 100; i++) {
-        const x = Math.random() * canvas.width;
-        const y = Math.random() * canvas.height;
-        const size = Math.random() * 3;
+      ctx.fillStyle = `rgb(${currentColor.r}, ${currentColor.g}, ${currentColor.b})`;
+      ctx.fillRect(0, 0, screenWidth, halfHeight);
+      
+      const floorGradient = ctx.createLinearGradient(0, halfHeight, 0, screenHeight);
+      floorGradient.addColorStop(0, `rgb(${currentColor.r + 5}, ${currentColor.g + 10}, ${currentColor.b + 20})`);
+      floorGradient.addColorStop(1, `rgb(${currentColor.r + 10}, ${currentColor.g + 20}, ${currentColor.b + 40})`);
+      ctx.fillStyle = floorGradient;
+      ctx.fillRect(0, halfHeight, screenWidth, halfHeight);
+
+      const terrain = terrainRef.current;
+      if (terrain.length === 0) return;
+
+      for (let x = 0; x < screenWidth; x += 2) {
+        const cameraX = 2 * x / screenWidth - 1;
+        const rayDirX = Math.sin(rotation.yaw) + Math.cos(rotation.yaw) * cameraX * Math.tan(fov / 2);
+        const rayDirZ = Math.cos(rotation.yaw) - Math.sin(rotation.yaw) * cameraX * Math.tan(fov / 2);
+
+        const rayLength = 20;
+        const steps = 40;
+        
+        for (let step = 1; step < steps; step++) {
+          const dist = (step / steps) * rayLength;
+          const sampleX = Math.floor(position.x + rayDirX * dist);
+          const sampleZ = Math.floor(position.z + rayDirZ * dist);
+
+          if (sampleX < 0 || sampleX >= terrain.length || sampleZ < 0 || sampleZ >= terrain[0].length) continue;
+
+          const cell = terrain[sampleX][sampleZ];
+          const terrainHeight = cell.height;
+
+          if (position.y - terrainHeight < 0.5) {
+            const wallHeight = screenHeight / (dist * 0.5);
+            const drawHeight = Math.min(wallHeight, screenHeight);
+            const drawStart = halfHeight - drawHeight / 2 + rotation.pitch * 200;
+
+            const fog = Math.min(1, dist / rayLength);
+            let r = 0, g = 0, b = 0;
+
+            switch (cell.type) {
+              case 'sand':
+                r = 194; g = 178; b = 128;
+                break;
+              case 'rock':
+                r = 100; g = 100; b = 110;
+                break;
+              case 'coral':
+                r = 255; g = 127; b = 80;
+                break;
+              case 'kelp':
+                r = 60; g = 120; b = 60;
+                break;
+            }
+
+            const shade = 1 - (step / steps) * 0.7;
+            r = Math.floor((r * shade) * (1 - fog) + currentColor.r * fog);
+            g = Math.floor((g * shade) * (1 - fog) + currentColor.g * fog);
+            b = Math.floor((b * shade) * (1 - fog) + currentColor.b * fog);
+
+            ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+            ctx.fillRect(x, drawStart, 2, drawHeight);
+            break;
+          }
+        }
+      }
+
+      ctx.fillStyle = 'rgba(14, 165, 233, 0.05)';
+      for (let i = 0; i < 50; i++) {
+        const px = Math.random() * screenWidth;
+        const py = Math.random() * screenHeight;
+        const size = Math.random() * 2 + 1;
         ctx.beginPath();
-        ctx.arc(x, y, size, 0, Math.PI * 2);
+        ctx.arc(px, py, size, 0, Math.PI * 2);
         ctx.fill();
       }
 
-      ctx.strokeStyle = 'rgba(14, 165, 233, 0.3)';
-      ctx.lineWidth = 2;
-      for (let i = 0; i < 5; i++) {
-        const y = (Math.sin(Date.now() / 1000 + i) * 50) + canvas.height / 2 + i * 100;
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        for (let x = 0; x < canvas.width; x += 10) {
-          const wave = Math.sin((x + Date.now() / 500 + i * 100) / 50) * 20;
-          ctx.lineTo(x, y + wave);
-        }
-        ctx.stroke();
-      }
-
-      const podX = canvas.width / 2 + Math.sin(rotation.yaw) * 300 - position.x * 10;
-      const podY = canvas.height / 2 + Math.sin(rotation.pitch) * 200 + position.y * 30;
-      
-      ctx.fillStyle = 'rgba(234, 56, 76, 0.8)';
-      ctx.beginPath();
-      ctx.ellipse(podX, podY, 60, 80, 0, 0, Math.PI * 2);
-      ctx.fill();
-      
-      ctx.fillStyle = 'rgba(14, 165, 233, 0.6)';
-      ctx.beginPath();
-      ctx.ellipse(podX - 15, podY - 20, 15, 20, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.ellipse(podX + 15, podY - 20, 15, 20, 0, 0, Math.PI * 2);
-      ctx.fill();
-
-      ctx.fillStyle = 'rgba(255, 200, 100, 0.9)';
-      ctx.beginPath();
-      ctx.arc(podX, podY + 30, 8, 0, Math.PI * 2);
-      ctx.fill();
+      const vignette = ctx.createRadialGradient(
+        screenWidth / 2, screenHeight / 2, 0,
+        screenWidth / 2, screenHeight / 2, screenWidth * 0.7
+      );
+      vignette.addColorStop(0, 'rgba(0, 0, 0, 0)');
+      vignette.addColorStop(1, `rgba(0, 0, 0, ${0.4 + depthFactor * 0.3})`);
+      ctx.fillStyle = vignette;
+      ctx.fillRect(0, 0, screenWidth, screenHeight);
     };
 
     const animate = () => {
-      drawOcean();
+      renderRaycast();
       requestAnimationFrame(animate);
     };
 
@@ -137,7 +215,7 @@ function Index() {
         const sensitivity = 0.002;
         setRotation(prev => ({
           yaw: prev.yaw + e.movementX * sensitivity,
-          pitch: Math.max(-Math.PI / 3, Math.min(Math.PI / 3, prev.pitch + e.movementY * sensitivity))
+          pitch: Math.max(-0.8, Math.min(0.8, prev.pitch + e.movementY * sensitivity))
         }));
       }
     };
@@ -169,18 +247,21 @@ function Index() {
 
   useEffect(() => {
     const interval = setInterval(() => {
-      const speed = 0.15;
+      const speed = 0.1;
       let newX = position.x;
       let newY = position.y;
       let newZ = position.z;
 
+      const moveX = Math.sin(rotation.yaw);
+      const moveZ = Math.cos(rotation.yaw);
+
       if (keys['w']) {
-        newX += Math.sin(rotation.yaw) * speed;
-        newZ += Math.cos(rotation.yaw) * speed;
+        newX += moveX * speed;
+        newZ += moveZ * speed;
       }
       if (keys['s']) {
-        newX -= Math.sin(rotation.yaw) * speed;
-        newZ -= Math.cos(rotation.yaw) * speed;
+        newX -= moveX * speed;
+        newZ -= moveZ * speed;
       }
       if (keys['a']) {
         newX += Math.cos(rotation.yaw) * speed;
@@ -190,8 +271,20 @@ function Index() {
         newX -= Math.cos(rotation.yaw) * speed;
         newZ += Math.sin(rotation.yaw) * speed;
       }
-      if (keys[' ']) newY = Math.min(0, newY + speed);
-      if (keys['shift']) newY = Math.max(-50, newY - speed);
+      if (keys[' ']) newY = Math.min(5, newY + speed * 0.8);
+      if (keys['shift']) newY = Math.max(0.5, newY - speed * 0.8);
+
+      const terrain = terrainRef.current;
+      if (terrain.length > 0) {
+        const gridX = Math.floor(newX);
+        const gridZ = Math.floor(newZ);
+        if (gridX >= 0 && gridX < terrain.length && gridZ >= 0 && gridZ < terrain[0].length) {
+          const terrainHeight = terrain[gridX][gridZ].height;
+          if (newY < terrainHeight + 1.5) {
+            newY = terrainHeight + 1.5;
+          }
+        }
+      }
 
       if (newX !== position.x || newY !== position.y || newZ !== position.z) {
         setPosition({ x: newX, y: newY, z: newZ });
@@ -209,7 +302,7 @@ function Index() {
 
   useEffect(() => {
     const oxygenInterval = setInterval(() => {
-      if (position.y < -2) {
+      if (position.y < 2) {
         setStats(prev => ({ ...prev, oxygen: Math.max(0, prev.oxygen - 0.5) }));
       } else {
         setStats(prev => ({ ...prev, oxygen: Math.min(100, prev.oxygen + 2) }));
@@ -223,7 +316,7 @@ function Index() {
     <div className="relative w-screen h-screen overflow-hidden">
       <canvas ref={canvasRef} className="absolute inset-0" />
       
-      <div className="absolute top-6 left-6 space-y-3 pointer-events-none">
+      <div className="absolute top-6 left-6 space-y-3 pointer-events-none z-10">
         <Card className="bg-card/80 backdrop-blur-sm border-primary/30 p-4 space-y-2">
           <div className="flex items-center gap-3">
             <Icon name="Heart" className="text-destructive" size={20} />
@@ -253,10 +346,13 @@ function Index() {
             <Icon name="Waves" className="text-primary" size={18} />
             <span className="font-semibold">{stats.depth.toFixed(1)}m</span>
           </div>
+          <div className="text-xs text-muted-foreground mt-1">
+            X: {position.x.toFixed(1)} Z: {position.z.toFixed(1)}
+          </div>
         </Card>
       </div>
 
-      <div className="absolute top-6 right-6 pointer-events-none">
+      <div className="absolute top-6 right-6 pointer-events-none z-10">
         <Card className="bg-card/80 backdrop-blur-sm border-primary/30 p-4">
           <h3 className="text-sm font-bold mb-2 text-primary">CONTROLS</h3>
           <div className="text-xs space-y-1 text-muted-foreground">
@@ -270,7 +366,7 @@ function Index() {
       </div>
 
       {showInventory && (
-        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center pointer-events-auto">
+        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center pointer-events-auto z-20">
           <Card className="bg-card/95 border-primary/50 p-6 w-[500px]">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-2xl font-bold text-primary">INVENTORY</h2>
@@ -305,7 +401,7 @@ function Index() {
         </div>
       )}
 
-      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 pointer-events-none">
+      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 pointer-events-none z-10">
         <div className="text-center">
           <div className="w-1 h-1 bg-primary rounded-full mx-auto mb-2 shadow-lg shadow-primary/50" />
           <p className="text-xs text-primary/80 font-medium">Click to enable controls</p>
@@ -313,7 +409,7 @@ function Index() {
       </div>
 
       {stats.oxygen < 30 && (
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none">
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none z-10">
           <div className="text-destructive text-2xl font-bold animate-pulse flex items-center gap-2">
             <Icon name="AlertTriangle" size={32} />
             LOW OXYGEN
